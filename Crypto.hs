@@ -87,6 +87,7 @@ repeatingKeyXor k pt = B.pack $ B.zipWith fixedXorByte key pt
 hammingDistance :: B.ByteString -> B.ByteString -> Int
 hammingDistance x y = sum . map BTS.popCount $ B.zipWith fixedXorByte x y
 
+decodeRepeatingKeyXor :: String -> [B.ByteString]
 decodeRepeatingKeyXor ct = map (getResult . fst) minEditDistances
   where normEditDistance keySize
           | keySize*4 > length ct = 100000000
