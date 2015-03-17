@@ -14,14 +14,22 @@ toHex
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
+
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Base16 as B16
+
 import qualified Data.ByteString.Char8 as C8
+
 import qualified Data.Word8 as W8
 import qualified Data.Word as W
+
+import qualified Codec.Encryption.AES as AES
+import qualified Data.LargeWord as LGW
+
 import qualified Data.Char as C
 import qualified Data.List as L
 import qualified Data.List.Split as LS
+
 import qualified Data.Map as M
 import qualified Numeric as N
 import qualified Data.Bits as BTS
@@ -31,11 +39,11 @@ import Data.Ord
 charFreqs :: M.Map W.Word8 Float
 charFreqs = M.fromList . map (\(x, y) -> (fromIntegral . C.ord $ x, y)) $ [('E', 0.1202), ('T', 0.091), ('A', 0.0812), ('O', 0.0768), ('I', 0.0731), ('N', 0.0695), ('S', 0.06280000000000001), ('R', 0.0602), ('H', 0.0592), ('D', 0.0432), ('L', 0.0398), ('U', 0.0288), ('C', 0.0271), ('M', 0.026099999999999998), ('F', 0.023), ('Y', 0.021099999999999997), ('W', 0.0209), ('G', 0.0203), ('P', 0.0182), ('B', 0.0149), ('V', 0.0111), ('K', 0.0069), ('X', 0.0017000000000000001), ('Q', 0.0011), ('J', 0.001), ('Z', 0.0007000000000000001)]
 
+asciiToUpper :: W.Word8 -> W.Word8
 asciiToUpper x = if x `elem` [97..122] then x-32 else x
 
+isAlpha' :: W.Word8 -> Bool
 isAlpha' x = if x `elem` (concat [[97..122],[65..90]]) then True else False
-
-isPunc x = if x `elem` (concat [[91..96],[123..126],[32..64],[10,13]]) then True else False
 
 toHex :: B.ByteString -> String
 toHex = C8.unpack . B16.encode
@@ -102,3 +110,38 @@ decodeRepeatingKeyXor ct = map (getResult . fst) minEditDistances
           where ctBlocks = map C8.pack . LS.chunksOf ed $ ct
                 ctTranspose = B.transpose ctBlocks
                 results = map (take 1 . decodeSingleByteXor . toHex) ctTranspose
+
+split :: Int -> B.ByteString -> [B.ByteString]
+split n bs
+  | B.length bs == 0 = []
+  | B.length bs < n = [bs]
+  | otherwise = B.take n bs : split n (B.drop n bs)
+
+fromBytes :: (Num a, BTS.Bits a) => [a] -> a
+fromBytes input =
+    let dofb accum [] = accum
+        dofb accum (x:xs) = dofb ((BTS.shiftL accum 8) BTS..|. x) xs
+        in
+        dofb 0 input
+
+blockWord8sIn64 :: [W.Word8] -> [[W.Word8]]
+blockWord8sIn64 =
+   L.unfoldr g
+   where
+      g [] = Nothing
+      g xs = Just (L.splitAt 8 xs)
+
+getWord64s :: [W.Word8] -> [W.Word64]
+getWord64s =
+   map fromBytes . map (map fromIntegral) .  blockWord8sIn64
+
+getWord128 :: W.Word64 -> W.Word64 -> LGW.LargeKey W.Word64 W.Word64
+getWord128 x y = fromIntegral $ (BTS.shiftL x 64) BTS..|. y
+
+-- aesECBEncrypt :: LGW.Word128 -> B.ByteString -> B.ByteString
+aesECBEncrypt k pt = map (AES.encrypt k) ptBlocks
+  where w64s = getWord64s . B.unpack $ pt
+        w64pairs = helper w64s
+          where helper [] = []
+                helper (a:b:cs) = [a,b] : helper cs
+        ptBlocks = map (\[a, b] -> getWord128 a b) w64pairs
