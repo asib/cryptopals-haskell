@@ -17,6 +17,7 @@ toHex
 ,pkcs7Pad
 ,aesCBCEncrypt
 ,aesCBCDecrypt
+,aesRandIV
 ) where
 
 import qualified Data.ByteString as B
@@ -41,7 +42,9 @@ import qualified Data.Map as M
 import qualified Numeric as N
 import qualified Data.Bits as BTS
 import qualified Text.Printf as TPF
-import Data.Ord
+import Data.Ord (comparing)
+import System.Random (randomRIO)
+import System.Entropy (getEntropy)
 
 charFreqs :: M.Map W.Word8 Float
 charFreqs = M.fromList . map (\(x, y) -> (fromIntegral . C.ord $ x, y)) $ [('E', 0.1202), ('T', 0.091), ('A', 0.0812), ('O', 0.0768), ('I', 0.0731), ('N', 0.0695), ('S', 0.06280000000000001), ('R', 0.0602), ('H', 0.0592), ('D', 0.0432), ('L', 0.0398), ('U', 0.0288), ('C', 0.0271), ('M', 0.026099999999999998), ('F', 0.023), ('Y', 0.021099999999999997), ('W', 0.0209), ('G', 0.0203), ('P', 0.0182), ('B', 0.0149), ('V', 0.0111), ('K', 0.0069), ('X', 0.0017000000000000001), ('Q', 0.0011), ('J', 0.001), ('Z', 0.0007000000000000001)]
@@ -214,3 +217,24 @@ aesCBCDecrypt k iv ct =
           helper _ [] = []
           helper lst (c:cs) = cDec : helper c cs
             where cDec = AES.decrypt k c `BTS.xor` lst
+
+aesRandIV :: IO LGW.Word128
+aesRandIV = do
+  b <- getEntropy 16
+  return $ aesKey b
+
+aesEncryptRandom :: B.ByteString -> IO B.ByteString
+aesEncryptRandom pt = do
+  key <- aesRandIV
+  iv <- aesRandIV
+  ap <- randomRIO(5,10) :: IO Int
+  ap1 <- getEntropy ap
+  ap2 <- getEntropy ap
+  mode <- randomRIO (1,2) :: IO Int
+  let p = B.append ap1 $ B.append pt ap2
+  if mode == 1 then
+    -- ecb
+    return $ aesECBEncrypt key p
+  else
+    -- cbc
+    return $ aesCBCEncrypt key iv p
