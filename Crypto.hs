@@ -10,6 +10,13 @@ toHex
 ,repeatingKeyXor
 ,hammingDistance
 ,decodeRepeatingKeyXor
+,aesKey
+,aesECBEncrypt
+,aesECBDecrypt
+,isAESInECB
+,pkcs7Pad
+,aesCBCEncrypt
+,aesCBCDecrypt
 ) where
 
 import qualified Data.ByteString as B
@@ -135,13 +142,75 @@ getWord64s :: [W.Word8] -> [W.Word64]
 getWord64s =
    map fromBytes . map (map fromIntegral) .  blockWord8sIn64
 
-getWord128 :: W.Word64 -> W.Word64 -> LGW.LargeKey W.Word64 W.Word64
-getWord128 x y = fromIntegral $ (BTS.shiftL x 64) BTS..|. y
+-- getWord128 :: W.Word64 -> W.Word64 -> LGW.LargeKey W.Word64 W.Word64
+getWord128 :: W.Word64 -> W.Word64 -> LGW.Word128
+getWord128 x y = (BTS.shiftL (fromIntegral x) 64) BTS..|. (fromIntegral y)
 
--- aesECBEncrypt :: LGW.Word128 -> B.ByteString -> B.ByteString
-aesECBEncrypt k pt = map (AES.encrypt k) ptBlocks
-  where w64s = getWord64s . B.unpack $ pt
-        w64pairs = helper w64s
-          where helper [] = []
-                helper (a:b:cs) = [a,b] : helper cs
-        ptBlocks = map (\[a, b] -> getWord128 a b) w64pairs
+fromWord128 :: LGW.Word128 -> [W.Word8]
+fromWord128 bl = reverse $ helper (fromIntegral bl :: Integer) 16
+  where helper _ 0 = []
+        helper b c =
+          let w8 = fromIntegral b :: W.Word8
+              shifted = BTS.shiftR b 8
+              in
+              w8 : helper shifted (c-1)
+
+byteStringToWord128s :: B.ByteString -> [LGW.Word128]
+byteStringToWord128s bs =
+  let w64s = getWord64s . B.unpack $ bs
+      w64pairs = helper w64s
+        where helper [] = []
+              helper (a:b:cs) = (a,b) : helper cs
+              helper _ = error "invalid length"
+      in
+      map (uncurry getWord128) w64pairs
+
+aesKey :: B.ByteString -> LGW.Word128
+aesKey k
+ | B.length k == 16 =
+    let [k1, k2] = getWord64s . B.unpack $ k
+        in
+        getWord128 k1 k2
+ | otherwise = error "invalid key size"
+
+pkcs7Pad :: Int -> B.ByteString -> B.ByteString
+pkcs7Pad n b = B.append b $ B.replicate ap $ fromIntegral ap
+ where ap = n - (B.length b `mod` n)
+
+aesECBEncrypt :: LGW.Word128 -> B.ByteString -> B.ByteString
+aesECBEncrypt k pt =
+  let ptBlocks = byteStringToWord128s . pkcs7Pad 16 $ pt
+      in
+      B.pack . L.concatMap fromWord128 $ map (AES.encrypt k) ptBlocks
+
+aesECBDecrypt :: LGW.Word128 -> B.ByteString -> B.ByteString
+aesECBDecrypt k ct =
+  let ctBlocks = byteStringToWord128s $ ct
+      in
+      B.pack . L.concatMap fromWord128 $ map (AES.decrypt k) ctBlocks
+
+isAESInECB :: B.ByteString -> Bool
+isAESInECB ct =
+  let (bl:bls) = byteStringToWord128s ct
+      helper _ [] = False
+      helper b bs@(c:ds)
+        | any (==b) bs = True
+        | otherwise = helper c ds
+      in
+      helper bl bls
+
+aesCBCEncrypt :: LGW.Word128 -> LGW.Word128 -> B.ByteString -> B.ByteString
+aesCBCEncrypt k iv pt =
+  B.pack . L.concatMap fromWord128 $ helper iv ptBlocks
+    where ptBlocks = byteStringToWord128s . pkcs7Pad 16 $ pt
+          helper _ [] = []
+          helper lst (p:ps) = pEnc : helper pEnc ps
+            where pEnc = AES.encrypt k (p `BTS.xor` lst)
+
+aesCBCDecrypt :: LGW.Word128 -> LGW.Word128 -> B.ByteString -> B.ByteString
+aesCBCDecrypt k iv ct =
+  B.pack . L.concatMap fromWord128 $ helper iv ctBlocks
+    where ctBlocks = byteStringToWord128s ct
+          helper _ [] = []
+          helper lst (c:cs) = cDec : helper c cs
+            where cDec = AES.decrypt k c `BTS.xor` lst
