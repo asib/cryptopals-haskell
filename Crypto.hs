@@ -18,6 +18,7 @@ toHex
 ,aesCBCEncrypt
 ,aesCBCDecrypt
 ,aesRandIV
+,aesEncryptRandom
 ) where
 
 import qualified Data.ByteString as B
@@ -232,6 +233,7 @@ aesEncryptRandom pt = do
   ap2 <- getEntropy ap
   mode <- randomRIO (1,2) :: IO Int
   let p = B.append ap1 $ B.append pt ap2
+  -- print mode -- for testing
   if mode == 1 then
     -- ecb
     return $ aesECBEncrypt key p
