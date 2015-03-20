@@ -19,6 +19,7 @@ toHex
 ,aesCBCDecrypt
 ,aesRandIV
 ,aesEncryptRandom
+,aesByteAtATimeECBEncryptSimple
 ) where
 
 import qualified Data.ByteString as B
@@ -29,7 +30,6 @@ import qualified Data.ByteString.Base16 as B16
 
 import qualified Data.ByteString.Char8 as C8
 
-import qualified Data.Word8 as W8
 import qualified Data.Word as W
 
 import qualified Codec.Encryption.AES as AES
@@ -54,7 +54,7 @@ asciiToUpper :: W.Word8 -> W.Word8
 asciiToUpper x = if x `elem` [97..122] then x-32 else x
 
 isAlpha' :: W.Word8 -> Bool
-isAlpha' x = if x `elem` (concat [[97..122],[65..90]]) then True else False
+isAlpha' x = x `elem` [97..122]++[65..90]
 
 toHex :: B.ByteString -> String
 toHex = C8.unpack . B16.encode
@@ -73,7 +73,7 @@ fixedXor :: B.ByteString -> B.ByteString -> B.ByteString
 fixedXor xs ys = B.pack . map (uncurry BTS.xor) $ B.zip xs ys
 
 fixedXorByte :: W.Word8 -> W.Word8 -> W.Word8
-fixedXorByte x y = BTS.xor x y
+fixedXorByte = BTS.xor
 
 score :: B.ByteString -> Float
 score s = chi2
@@ -198,7 +198,7 @@ isAESInECB ct =
   let (bl:bls) = byteStringToWord128s ct
       helper _ [] = False
       helper b bs@(c:ds)
-        | any (==b) bs = True
+        | b `elem` bs = True
         | otherwise = helper c ds
       in
       helper bl bls
@@ -240,3 +240,18 @@ aesEncryptRandom pt = do
   else
     -- cbc
     return $ aesCBCEncrypt key iv p
+
+aesByteAtATimeECBEncryptSimple :: LGW.Word128 -> B.ByteString -> B.ByteString
+aesByteAtATimeECBEncryptSimple k pt =
+  aesECBEncrypt k x
+    where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+          x = pt `B.append` secret
+
+getBlockSizeSimple :: (LGW.Word128 -> B.ByteString -> B.ByteString) -> LGW.Word128 -> Int
+getBlockSizeSimple oracle k =
+  helper 0 0
+    where helper c l
+            | c == 0 = helper 1 encLen
+            | encLen /= l = encLen - l
+            | otherwise = helper (c+1) encLen
+              where encLen = B.length . oracle k $ B.replicate c 65
