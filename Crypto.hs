@@ -1,6 +1,7 @@
 module Crypto
 (
-toHex
+bsSplit
+,toHex
 ,fromHex
 ,toBase64
 ,fromBase64
@@ -20,6 +21,13 @@ toHex
 ,aesRandIV
 ,aesEncryptRandom
 ,aesByteAtATimeECBEncryptSimple
+,getBlockSizeSimple
+,aesByteAtATimeECBDecryptSimple
+,constructProfile
+,profileEncode
+,profileDecode
+,getProfile
+,remakeProfile
 ) where
 
 import qualified Data.ByteString as B
@@ -46,6 +54,7 @@ import qualified Text.Printf as TPF
 import Data.Ord (comparing)
 import System.Random (randomRIO)
 import System.Entropy (getEntropy)
+import Control.Monad (guard)
 
 charFreqs :: M.Map W.Word8 Float
 charFreqs = M.fromList . map (\(x, y) -> (fromIntegral . C.ord $ x, y)) $ [('E', 0.1202), ('T', 0.091), ('A', 0.0812), ('O', 0.0768), ('I', 0.0731), ('N', 0.0695), ('S', 0.06280000000000001), ('R', 0.0602), ('H', 0.0592), ('D', 0.0432), ('L', 0.0398), ('U', 0.0288), ('C', 0.0271), ('M', 0.026099999999999998), ('F', 0.023), ('Y', 0.021099999999999997), ('W', 0.0209), ('G', 0.0203), ('P', 0.0182), ('B', 0.0149), ('V', 0.0111), ('K', 0.0069), ('X', 0.0017000000000000001), ('Q', 0.0011), ('J', 0.001), ('Z', 0.0007000000000000001)]
@@ -122,11 +131,11 @@ decodeRepeatingKeyXor ct = map (getResult . fst) minEditDistances
                 ctTranspose = B.transpose ctBlocks
                 results = map (take 1 . decodeSingleByteXor . toHex) ctTranspose
 
-split :: Int -> B.ByteString -> [B.ByteString]
-split n bs
+bsSplit :: Int -> B.ByteString -> [B.ByteString]
+bsSplit n bs
   | B.length bs == 0 = []
   | B.length bs < n = [bs]
-  | otherwise = B.take n bs : split n (B.drop n bs)
+  | otherwise = B.take n bs : bsSplit n (B.drop n bs)
 
 fromBytes :: (Num a, BTS.Bits a) => [a] -> a
 fromBytes input =
@@ -244,7 +253,8 @@ aesEncryptRandom pt = do
 aesByteAtATimeECBEncryptSimple :: LGW.Word128 -> B.ByteString -> B.ByteString
 aesByteAtATimeECBEncryptSimple k pt =
   aesECBEncrypt k x
-    where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+    -- where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+    where secret = fromBase64 "VGhpcyBpcyBhIGJpZyB0ZXN0IGFuZCBJJ20gd29uZGVyaW5nIHdoZXRoZXIgbXkgZGVjcnlwdGlvbiBhbGdvcml0aG0gd2lsbCBiZSBhYmxlIHRvIGhhbmRsZSBpdC4gTGV0J3Mgc2VlIHdoYXQgdGhlIHJlc3VsdCBpcyBhbmQgaG93IHdlbGwgdGhlIGFsZ28gZmFpcnMu"
           x = pt `B.append` secret
 
 getBlockSizeSimple :: (LGW.Word128 -> B.ByteString -> B.ByteString) -> LGW.Word128 -> Int
@@ -255,3 +265,51 @@ getBlockSizeSimple oracle k =
             | encLen /= l = encLen - l
             | otherwise = helper (c+1) encLen
               where encLen = B.length . oracle k $ B.replicate c 65
+
+aesByteAtATimeECBDecryptSimple :: Int -> LGW.Word128 -> B.ByteString
+aesByteAtATimeECBDecryptSimple blSz k = helper 1 B.empty (blSz-1)
+  where secretLen = B.length $ aesByteAtATimeECBEncryptSimple k B.empty
+        matchBlock target less1 = do
+          x <- [0..255]
+          let r = B.take blSz . aesByteAtATimeECBEncryptSimple k $ B.snoc less1 x
+          guard (r == target)
+          return x
+        helper blc dbs (-1) = helper (blc+1) dbs (blSz-1)
+        helper blc dbs bc
+          | null dec = dbs
+          | otherwise = helper blc (dbs `B.snoc` (head dec)) $ bc-1
+            where pad = B.replicate bc 65
+                  tar = B.take blSz . dropFunc . aesByteAtATimeECBEncryptSimple k $ pad
+                  dec = matchBlock tar $ dropFunc $ pad `B.append` dbs
+                  dropFunc = B.drop (blSz * (blc-1))
+
+data User = User {  email :: String
+                  , uid :: Int
+                  , role :: String
+                  } deriving (Show)
+
+group :: String -> [(String, String)]
+group s = L.foldl (\acc x -> let (k:v:_) = LS.splitOn "=" x in (k,v):acc ) [] $ LS.splitOn "&" s
+
+profileEncode :: User -> String
+profileEncode u = "email=" ++ email u ++ "&uid=" ++ show (uid u) ++ "&role=" ++ role u
+
+profileDecode :: String -> Maybe User
+profileDecode s = do
+  let grps = group s
+      lk = flip lookup grps
+  e <- lk "email"
+  u <- lk "uid"
+  r <- lk "role"
+  return User {email=e, uid=read u, role=r}
+
+
+constructProfile :: String -> User
+constructProfile em = User {email=parsed, uid=10, role="user"}
+  where parsed = (filter . flip notElem) "&=" em
+
+getProfile :: LGW.Word128 -> String -> B.ByteString
+getProfile k p = aesECBEncrypt k . C8.pack . profileEncode . constructProfile $ p
+
+remakeProfile :: LGW.Word128 -> B.ByteString -> B.ByteString
+remakeProfile k ct = aesECBDecrypt k ct
