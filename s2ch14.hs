@@ -8,6 +8,8 @@ main :: IO ()
 main = do
   k <- getEntropy 16
   let key = aesKey k
-      blockSize = getBlockSizeSimple aesByteAtATimeECBEncryptSimple key
+      blockSize = getBlockSizeSimple aesByteAtATimeECBEncryptHarder key
       ecbMode = isAESInECB . aesByteAtATimeECBEncryptSimple key $ C8.pack "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  putStrLn . C8.unpack . aesByteAtATimeECBDecrypt aesByteAtATimeECBEncryptSimple blockSize $ key
+      (pad, prefix) = findPrefixLength aesByteAtATimeECBEncryptHarder key
+  {-print (pad,prefix)-}
+  putStrLn . C8.unpack . aesByteAtATimeECBDecrypt (aesByteAtATimeECBEncryptHarderWrapper pad prefix) blockSize $ key

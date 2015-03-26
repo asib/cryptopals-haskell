@@ -21,8 +21,11 @@ bsSplit
 ,aesRandIV
 ,aesEncryptRandom
 ,aesByteAtATimeECBEncryptSimple
+,aesByteAtATimeECBEncryptHarder
 ,getBlockSizeSimple
-,aesByteAtATimeECBDecryptSimple
+,findPrefixLength
+,aesByteAtATimeECBDecrypt
+,aesByteAtATimeECBEncryptHarderWrapper
 ,constructProfile
 ,profileEncode
 ,profileDecode
@@ -55,6 +58,8 @@ import Data.Ord (comparing)
 import System.Random (randomRIO)
 import System.Entropy (getEntropy)
 import Control.Monad (guard)
+
+type EncryptionAlgorithm = LGW.Word128 -> B.ByteString -> B.ByteString
 
 charFreqs :: M.Map W.Word8 Float
 charFreqs = M.fromList . map (\(x, y) -> (fromIntegral . C.ord $ x, y)) $ [('E', 0.1202), ('T', 0.091), ('A', 0.0812), ('O', 0.0768), ('I', 0.0731), ('N', 0.0695), ('S', 0.06280000000000001), ('R', 0.0602), ('H', 0.0592), ('D', 0.0432), ('L', 0.0398), ('U', 0.0288), ('C', 0.0271), ('M', 0.026099999999999998), ('F', 0.023), ('Y', 0.021099999999999997), ('W', 0.0209), ('G', 0.0203), ('P', 0.0182), ('B', 0.0149), ('V', 0.0111), ('K', 0.0069), ('X', 0.0017000000000000001), ('Q', 0.0011), ('J', 0.001), ('Z', 0.0007000000000000001)]
@@ -253,11 +258,21 @@ aesEncryptRandom pt = do
 aesByteAtATimeECBEncryptSimple :: LGW.Word128 -> B.ByteString -> B.ByteString
 aesByteAtATimeECBEncryptSimple k pt =
   aesECBEncrypt k x
-    -- where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
-    where secret = fromBase64 "VGhpcyBpcyBhIGJpZyB0ZXN0IGFuZCBJJ20gd29uZGVyaW5nIHdoZXRoZXIgbXkgZGVjcnlwdGlvbiBhbGdvcml0aG0gd2lsbCBiZSBhYmxlIHRvIGhhbmRsZSBpdC4gTGV0J3Mgc2VlIHdoYXQgdGhlIHJlc3VsdCBpcyBhbmQgaG93IHdlbGwgdGhlIGFsZ28gZmFpcnMu"
-          x = pt `B.append` secret
+  where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+        x = pt `B.append` secret
 
-getBlockSizeSimple :: (LGW.Word128 -> B.ByteString -> B.ByteString) -> LGW.Word128 -> Int
+aesByteAtATimeECBEncryptHarder :: LGW.Word128 -> B.ByteString -> B.ByteString
+aesByteAtATimeECBEncryptHarder k pt =
+  aesECBEncrypt k x
+  where secret = fromBase64 "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQpEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+        prefix = fromBase64 "8RHAQQe8QtDTCOcq23BquaBuwZOsfUDX5t19Gq3Ie72vbdm7EGJ5yglF7AfYxzO3iKojv1IE"
+        x = prefix `B.append` pt `B.append` secret
+
+aesByteAtATimeECBEncryptHarderWrapper :: Int -> Int -> LGW.Word128 -> B.ByteString -> B.ByteString
+aesByteAtATimeECBEncryptHarderWrapper initPad dropLen k pt =
+  B.drop dropLen $ aesByteAtATimeECBEncryptHarder k $ B.replicate initPad 65 `B.append` pt
+
+getBlockSizeSimple :: EncryptionAlgorithm -> LGW.Word128 -> Int
 getBlockSizeSimple oracle k =
   helper 0 0
     where helper c l
@@ -266,22 +281,58 @@ getBlockSizeSimple oracle k =
             | otherwise = helper (c+1) encLen
               where encLen = B.length . oracle k $ B.replicate c 65
 
-aesByteAtATimeECBDecryptSimple :: Int -> LGW.Word128 -> B.ByteString
-aesByteAtATimeECBDecryptSimple blSz k = helper 1 B.empty (blSz-1)
-  where secretLen = B.length $ aesByteAtATimeECBEncryptSimple k B.empty
+aesByteAtATimeECBDecrypt :: EncryptionAlgorithm -> Int -> LGW.Word128 -> B.ByteString
+aesByteAtATimeECBDecrypt enc blSz k = helper 1 B.empty (blSz-1)
+  where secretLen = B.length $ enc k B.empty
         matchBlock target less1 = do
           x <- [0..255]
-          let r = B.take blSz . aesByteAtATimeECBEncryptSimple k $ B.snoc less1 x
+          let r = B.take blSz . enc k $ B.snoc less1 x
           guard (r == target)
           return x
         helper blc dbs (-1) = helper (blc+1) dbs (blSz-1)
         helper blc dbs bc
-          | null dec = dbs
+          | null dec  = dbs
           | otherwise = helper blc (dbs `B.snoc` (head dec)) $ bc-1
             where pad = B.replicate bc 65
-                  tar = B.take blSz . dropFunc . aesByteAtATimeECBEncryptSimple k $ pad
+                  tar = B.take blSz . dropFunc . enc k $ pad
                   dec = matchBlock tar $ dropFunc $ pad `B.append` dbs
                   dropFunc = B.drop (blSz * (blc-1))
+
+{-
+ -findPrefixLength :: EncryptionAlgorithm -> LGW.Word128 -> (Int, Int)
+ -findPrefixLength enc k = (initialPad, helper' B.empty repeatedBlock B.empty)
+ -  where helper c l
+ -          | c == 0 = helper 1 encLen
+ -          | encLen /= l = (c, encLen - l)
+ -          | otherwise = helper (c+1) encLen
+ -          where encLen = B.length . enc k $ B.replicate c 65
+ -        (initialPad, blockSize) = helper 0 0
+ -        repeatedBlock = enc k $ B.replicate (initialPad+blockSize*2) 65
+ -        helper' processed leftover previous
+ -          | previous == B.empty = helper' processed tl hdr
+ -          | previous == hdr     = B.length processed
+ -          | otherwise           = helper' pr tl hdr
+ -          where hdr = B.take blockSize leftover
+ -                tl  = B.drop blockSize leftover
+ -                pr  = hdr `B.append` processed
+ -}
+
+findPrefixLength :: EncryptionAlgorithm -> LGW.Word128 -> (Int, Int)
+findPrefixLength enc k = (pad, helper' B.empty repeatedBlock B.empty)
+  where blSz = getBlockSizeSimple enc k
+        pad  = helper 0
+        helper c
+          | isAESInECB ct = c `mod` blSz
+          | otherwise     = helper $ c+1
+          where ct = enc k $ B.replicate c 65
+        repeatedBlock = enc k $ B.replicate (pad+blSz*2) 65
+        helper' processed leftover previous
+          | previous == B.empty = helper' processed tl hdr
+          | previous == hdr     = B.length processed
+          | otherwise           = helper' pr tl hdr
+          where hdr = B.take blSz leftover
+                tl  = B.drop blSz leftover
+                pr  = hdr `B.append` processed
 
 data User = User {  email :: String
                   , uid :: Int
