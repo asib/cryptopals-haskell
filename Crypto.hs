@@ -26,6 +26,11 @@ bsSplit
 ,findPrefixLength
 ,aesByteAtATimeECBDecrypt
 ,aesByteAtATimeECBEncryptHarderWrapper
+,cbcBitFlipAttackEnc
+,cbcBitFlipAttackDec
+,randCBCEncrypt
+,randCBCDecrypt
+,crackCBCPaddingOracle
 ,constructProfile
 ,profileEncode
 ,profileDecode
@@ -60,6 +65,37 @@ import System.Entropy (getEntropy)
 import Control.Monad (guard)
 
 type EncryptionAlgorithm = LGW.Word128 -> B.ByteString -> B.ByteString
+
+data User = User {  email :: String
+                  , uid :: Int
+                  , role :: String
+                  } deriving (Show)
+
+group :: String -> [(String, String)]
+group s = L.foldl (\acc x -> let (k:v:_) = LS.splitOn "=" x in (k,v):acc ) [] $ LS.splitOn "&" s
+
+profileEncode :: User -> String
+profileEncode u = "email=" ++ email u ++ "&uid=" ++ show (uid u) ++ "&role=" ++ role u
+
+profileDecode :: String -> Maybe User
+profileDecode s = do
+  let grps = group s
+      lk = flip lookup grps
+  e <- lk "email"
+  u <- lk "uid"
+  r <- lk "role"
+  return User {email=e, uid=read u, role=r}
+
+
+constructProfile :: String -> User
+constructProfile em = User {email=parsed, uid=10, role="user"}
+  where parsed = (filter . flip notElem) "&=" em
+
+getProfile :: LGW.Word128 -> String -> B.ByteString
+getProfile k p = aesECBEncrypt k . C8.pack . profileEncode . constructProfile $ p
+
+remakeProfile :: LGW.Word128 -> B.ByteString -> B.ByteString
+remakeProfile k ct = aesECBDecrypt k ct
 
 charFreqs :: M.Map W.Word8 Float
 charFreqs = M.fromList . map (\(x, y) -> (fromIntegral . C.ord $ x, y)) $ [('E', 0.1202), ('T', 0.091), ('A', 0.0812), ('O', 0.0768), ('I', 0.0731), ('N', 0.0695), ('S', 0.06280000000000001), ('R', 0.0602), ('H', 0.0592), ('D', 0.0432), ('L', 0.0398), ('U', 0.0288), ('C', 0.0271), ('M', 0.026099999999999998), ('F', 0.023), ('Y', 0.021099999999999997), ('W', 0.0209), ('G', 0.0203), ('P', 0.0182), ('B', 0.0149), ('V', 0.0111), ('K', 0.0069), ('X', 0.0017000000000000001), ('Q', 0.0011), ('J', 0.001), ('Z', 0.0007000000000000001)]
@@ -160,7 +196,6 @@ getWord64s :: [W.Word8] -> [W.Word64]
 getWord64s =
    map fromBytes . map (map fromIntegral) .  blockWord8sIn64
 
--- getWord128 :: W.Word64 -> W.Word64 -> LGW.LargeKey W.Word64 W.Word64
 getWord128 :: W.Word64 -> W.Word64 -> LGW.Word128
 getWord128 x y = (BTS.shiftL (fromIntegral x) 64) BTS..|. (fromIntegral y)
 
@@ -298,25 +333,6 @@ aesByteAtATimeECBDecrypt enc blSz k = helper 1 B.empty (blSz-1)
                   dec = matchBlock tar $ dropFunc $ pad `B.append` dbs
                   dropFunc = B.drop (blSz * (blc-1))
 
-{-
- -findPrefixLength :: EncryptionAlgorithm -> LGW.Word128 -> (Int, Int)
- -findPrefixLength enc k = (initialPad, helper' B.empty repeatedBlock B.empty)
- -  where helper c l
- -          | c == 0 = helper 1 encLen
- -          | encLen /= l = (c, encLen - l)
- -          | otherwise = helper (c+1) encLen
- -          where encLen = B.length . enc k $ B.replicate c 65
- -        (initialPad, blockSize) = helper 0 0
- -        repeatedBlock = enc k $ B.replicate (initialPad+blockSize*2) 65
- -        helper' processed leftover previous
- -          | previous == B.empty = helper' processed tl hdr
- -          | previous == hdr     = B.length processed
- -          | otherwise           = helper' pr tl hdr
- -          where hdr = B.take blockSize leftover
- -                tl  = B.drop blockSize leftover
- -                pr  = hdr `B.append` processed
- -}
-
 findPrefixLength :: EncryptionAlgorithm -> LGW.Word128 -> (Int, Int)
 findPrefixLength enc k = (pad, helper' B.empty repeatedBlock B.empty)
   where blSz = getBlockSizeSimple enc k
@@ -334,33 +350,83 @@ findPrefixLength enc k = (pad, helper' B.empty repeatedBlock B.empty)
                 tl  = B.drop blSz leftover
                 pr  = hdr `B.append` processed
 
-data User = User {  email :: String
-                  , uid :: Int
-                  , role :: String
-                  } deriving (Show)
+validPadding :: B.ByteString -> Bool
+validPadding s =
+  count still $ fromIntegral lst - 1
+  where split str = (B.last str, B.init str)
+        (lst, still) = split s
+        count _  0 = True
+        count st r = if l == lst
+                     then count ls $ r-1
+                     else False
+                     where (l, ls) = split st
 
-group :: String -> [(String, String)]
-group s = L.foldl (\acc x -> let (k:v:_) = LS.splitOn "=" x in (k,v):acc ) [] $ LS.splitOn "&" s
+quote :: B.ByteString -> B.ByteString
+quote = B.pack . reverse . helper [] . B.unpack
+  where helper acc (w:ws) = case w of
+                              59 -> helper (66:51:37:acc) ws
+                              61 -> helper (68:51:37:acc) ws
+                              x  -> helper (x:acc) ws
+        helper acc _      = acc
 
-profileEncode :: User -> String
-profileEncode u = "email=" ++ email u ++ "&uid=" ++ show (uid u) ++ "&role=" ++ role u
+cbcBitFlipAttackEnc :: LGW.Word128 -> B.ByteString -> B.ByteString
+cbcBitFlipAttackEnc k pt = aesCBCEncrypt k k modified
+  where pre      = C8.pack "comment1=cooking%20MCs;userdata="
+        suf      = C8.pack ";comment2=%20like%20a%20pound%20of%20bacon"
+        modified = pre `B.append` pt `B.append` suf
 
-profileDecode :: String -> Maybe User
-profileDecode s = do
-  let grps = group s
-      lk = flip lookup grps
-  e <- lk "email"
-  u <- lk "uid"
-  r <- lk "role"
-  return User {email=e, uid=read u, role=r}
+cbcBitFlipAttackDec :: LGW.Word128 -> B.ByteString -> Bool
+cbcBitFlipAttackDec k ct = (C8.pack ";admin=true;") `B.isInfixOf` dec
+  where dec = aesCBCDecrypt k k ct
 
+randCBCEncrypt :: IO (LGW.Word128, B.ByteString)
+randCBCEncrypt = do
+  k' <- getEntropy 16
+  n  <- randomRIO (0, 9) :: IO Int
+  return $ (aesKey k', helper k' n)
+  where helper k' n = aesCBCEncrypt k k $ head random
+          where k      = aesKey k'
+                random = drop n $ map fromBase64 [ "MDAwMDAwTm93IHRoYXQgdGhlIHBhcnR5IGlzIGp1bXBpbmc="
+                                                 , "MDAwMDAxV2l0aCB0aGUgYmFzcyBraWNrZWQgaW4gYW5kIHRoZSBWZWdhJ3MgYXJlIHB1bXBpbic="
+                                                 , "MDAwMDAyUXVpY2sgdG8gdGhlIHBvaW50LCB0byB0aGUgcG9pbnQsIG5vIGZha2luZw=="
+                                                 , "MDAwMDAzQ29va2luZyBNQydzIGxpa2UgYSBwb3VuZCBvZiBiYWNvbg=="
+                                                 , "MDAwMDA0QnVybmluZyAnZW0sIGlmIHlvdSBhaW4ndCBxdWljayBhbmQgbmltYmxl"
+                                                 , "MDAwMDA1SSBnbyBjcmF6eSB3aGVuIEkgaGVhciBhIGN5bWJhbA=="
+                                                 , "MDAwMDA2QW5kIGEgaGlnaCBoYXQgd2l0aCBhIHNvdXBlZCB1cCB0ZW1wbw=="
+                                                 , "MDAwMDA3SSdtIG9uIGEgcm9sbCwgaXQncyB0aW1lIHRvIGdvIHNvbG8="
+                                                 , "MDAwMDA4b2xsaW4nIGluIG15IGZpdmUgcG9pbnQgb2g="
+                                                 , "MDAwMDA5aXRoIG15IHJhZy10b3AgZG93biBzbyBteSBoYWlyIGNhbiBibG93"
+                                                 ]
 
-constructProfile :: String -> User
-constructProfile em = User {email=parsed, uid=10, role="user"}
-  where parsed = (filter . flip notElem) "&=" em
+randCBCDecrypt :: LGW.Word128 -> B.ByteString -> Bool
+randCBCDecrypt k ct = validPadding dec
+  where dec = aesCBCDecrypt k k ct
 
-getProfile :: LGW.Word128 -> String -> B.ByteString
-getProfile k p = aesECBEncrypt k . C8.pack . profileEncode . constructProfile $ p
+{-crackCBCPaddingOracle :: LGW.Word128 -> B.ByteString -> B.ByteString-}
+crackCBCPaddingOracle k ct = foldl B.append B.empty $ crackWhole [] blocks
+  where iv     = B.pack . fromWord128 $ k
+        blocks = bsSplit 16 $ iv `B.append` ct
+        crackWhole acc (a:b:cs) = crackWhole (acc++[bl]) (b:cs)
+          where bl = crackBlock a b B.empty B.empty 15
+        crackWhole acc _        = acc
+        crackBlock _    _   _   acc (-1) = acc
+        crackBlock rpre suf int acc pad  = crackBlock rpre suf (ib `B.cons` int) (pb `B.cons` acc) (pad-1)
+          where rnd      = B.pack [15,149,199,91,162,248,71,76,133,92,139,27,204,236,221,189] -- just some random bytes
+                pkPad    = 16-pad
+                iPad     = fromIntegral pad
+                mod      = B.map (`BTS.xor` pkPad) int
+                ib       = pkPad `BTS.xor` head getByte
+                pb       = (B.head . B.drop iPad) rpre `BTS.xor` ib
+                getByte  = do
+                  x <- [0..255]
+                  let ct = B.take iPad rnd `B.append` B.cons x mod `B.append` suf
+                  guard (randCBCDecrypt k ct)
+                  return x
 
-remakeProfile :: LGW.Word128 -> B.ByteString -> B.ByteString
-remakeProfile k ct = aesECBDecrypt k ct
+w64LittleEndian :: W.Word64 -> W.Word64
+w64LittleEndian w = (fromIntegral w :: W.Word32)
+
+aesCTR :: LGW.Word128 -> LGW.Word128o
+
+-- left half  = 18446744069414584320
+-- right half = 4294967295
