@@ -31,6 +31,7 @@ bsSplit
 ,randCBCEncrypt
 ,randCBCDecrypt
 ,crackCBCPaddingOracle
+,aesCTR
 ,constructProfile
 ,profileEncode
 ,profileDecode
@@ -198,6 +199,15 @@ getWord64s =
 
 getWord128 :: W.Word64 -> W.Word64 -> LGW.Word128
 getWord128 x y = (BTS.shiftL (fromIntegral x) 64) BTS..|. (fromIntegral y)
+
+fromWord64 :: W.Word64 -> [W.Word8]
+fromWord64 bl = reverse $ helper (fromIntegral bl :: Integer) 8
+  where helper _ 0 = []
+        helper b c =
+          let w8 = fromIntegral b :: W.Word8
+              shifted = BTS.shiftR b 8
+              in
+              w8 : helper shifted (c-1)
 
 fromWord128 :: LGW.Word128 -> [W.Word8]
 fromWord128 bl = reverse $ helper (fromIntegral bl :: Integer) 16
@@ -423,10 +433,21 @@ crackCBCPaddingOracle k ct = foldl B.append B.empty $ crackWhole [] blocks
                   guard (randCBCDecrypt k ct)
                   return x
 
-w64LittleEndian :: W.Word64 -> W.Word64
-w64LittleEndian w = (fromIntegral w :: W.Word32)
+w64LE :: W.Word64 -> W.Word64
+w64LE w = r BTS..|. l
+  where r = fromIntegral $ BTS.shiftL (fromIntegral (fromIntegral w :: W.Word32) :: W.Word64) 32
+        l = fromIntegral $ BTS.shiftR w 32
 
-aesCTR :: LGW.Word128 -> LGW.Word128o
+w64LEAlt :: W.Word64 -> W.Word64
+w64LEAlt = head . getWord64s . reverse . fromWord64
 
--- left half  = 18446744069414584320
--- right half = 4294967295
+w32sLE :: W.Word32 -> W.Word32 -> W.Word64
+w32sLE l r = fromIntegral (BTS.shiftL l 32) BTS..|. fromIntegral r
+
+fixedXorLazy :: LB.ByteString -> LB.ByteString -> LB.ByteString
+fixedXorLazy x y = LB.pack $ LB.zipWith BTS.xor x y
+
+aesCTR :: LGW.Word128 -> W.Word64 -> B.ByteString -> B.ByteString
+aesCTR k n pt = LB.toStrict $ keyStream `fixedXorLazy` LB.fromStrict pt
+  where keyBlocks = zipWith getWord128 (repeat (w64LEAlt n)) $ map w64LEAlt [0..]
+        keyStream = LB.pack . L.concatMap fromWord128 $ map (AES.encrypt k) keyBlocks
