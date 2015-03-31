@@ -32,6 +32,8 @@ bsSplit
 ,randCBCDecrypt
 ,crackCBCPaddingOracle
 ,aesCTR
+,initMT
+,extractMT
 ,constructProfile
 ,profileEncode
 ,profileDecode
@@ -57,6 +59,7 @@ import qualified Data.List as L
 import qualified Data.List.Split as LS
 
 import qualified Data.Map as M
+import qualified Data.Sequence as S
 import qualified Numeric as N
 import qualified Data.Bits as BTS
 import qualified Text.Printf as TPF
@@ -451,3 +454,34 @@ aesCTR :: LGW.Word128 -> W.Word64 -> B.ByteString -> B.ByteString
 aesCTR k n pt = LB.toStrict $ keyStream `fixedXorLazy` LB.fromStrict pt
   where keyBlocks = zipWith getWord128 (repeat (w64LEAlt n)) $ map w64LEAlt [0..]
         keyStream = LB.pack . L.concatMap fromWord128 $ map (AES.encrypt k) keyBlocks
+
+initMT :: W.Word32 -> (Int, S.Seq W.Word32)
+initMT seed = (0, S.fromList (seed : helper 1 seed))
+  where helper 624   _    = []
+        helper count prev = n : helper (count+1) n
+          where n = (1812433253 * (x `BTS.xor` (BTS.shiftR x 30)) + count) :: W.Word32
+                x = fromIntegral prev
+
+genNumsMT :: S.Seq W.Word32 -> S.Seq W.Word32
+genNumsMT x = helper 0 x
+  where helper 624 st = st
+        helper i   st = helper (i+1) (S.update i y' st)
+          where y  = ((st `S.index` i) BTS..&. 0x80000000) + ((st `S.index` j) BTS..&. 0x7fffffff)
+                j  = (i+1) `mod` 624
+                k  = (i+397) `mod` 624
+                n  = (st `S.index` k) `BTS.xor` (BTS.shiftR y 1)
+                y' = if odd y
+                       then n `BTS.xor` 0x9908b0df
+                       else n
+
+extractMT :: (Int, S.Seq W.Word32) -> (W.Word32, (Int, S.Seq W.Word32))
+extractMT (i, st) = (y3, (i', st'))
+  where i'  = i+1 `mod` 624
+        st' = if i == 0
+                then genNumsMT st
+                else st
+        y   = fromIntegral $ st' `S.index` i
+        y0  = y `BTS.xor` (BTS.shiftR y 11)
+        y1  = y0 `BTS.xor` ((BTS.shiftL y0 7) BTS..&. 0x9d2c5680)
+        y2  = y1 `BTS.xor` ((BTS.shiftL y1 15) BTS..&. 0xefc60000)
+        y3  = y2 `BTS.xor` (BTS.shiftR y2 18)
