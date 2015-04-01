@@ -33,7 +33,9 @@ bsSplit
 ,crackCBCPaddingOracle
 ,aesCTR
 ,initMT
+,genNumsMT
 ,extractMT
+,untemper
 ,constructProfile
 ,profileEncode
 ,profileDecode
@@ -214,6 +216,15 @@ fromWord64 bl = reverse $ helper (fromIntegral bl :: Integer) 8
 
 fromWord128 :: LGW.Word128 -> [W.Word8]
 fromWord128 bl = reverse $ helper (fromIntegral bl :: Integer) 16
+  where helper _ 0 = []
+        helper b c =
+          let w8 = fromIntegral b :: W.Word8
+              shifted = BTS.shiftR b 8
+              in
+              w8 : helper shifted (c-1)
+
+fromWord32 :: W.Word32 -> [W.Word8]
+fromWord32 bl = reverse $ helper (fromIntegral bl :: Integer) 4
   where helper _ 0 = []
         helper b c =
           let w8 = fromIntegral b :: W.Word8
@@ -475,13 +486,44 @@ genNumsMT x = helper 0 x
                        else n
 
 extractMT :: (Int, S.Seq W.Word32) -> (W.Word32, (Int, S.Seq W.Word32))
-extractMT (i, st) = (y3, (i', st'))
+extractMT (i, st) = (fromIntegral y3, (i', st'))
   where i'  = i+1 `mod` 624
         st' = if i == 0
                 then genNumsMT st
                 else st
-        y   = fromIntegral $ st' `S.index` i
+        y   = (fromIntegral $ st' `S.index` i) :: Integer
         y0  = y `BTS.xor` (BTS.shiftR y 11)
         y1  = y0 `BTS.xor` ((BTS.shiftL y0 7) BTS..&. 0x9d2c5680)
         y2  = y1 `BTS.xor` ((BTS.shiftL y1 15) BTS..&. 0xefc60000)
         y3  = y2 `BTS.xor` (BTS.shiftR y2 18)
+
+untemper :: W.Word32 -> W.Word32
+untemper w = fromIntegral d'
+  where w' = fromIntegral w :: Int
+        w0 = w' `BTS.xor` ( w' `BTS.shiftR` 18)
+        w1 = w0 `BTS.xor` ((w0 `BTS.shiftL` 15) BTS..&. 0xefc60000)
+        w2 = w1 `BTS.xor` ((w1 `BTS.shiftL` 7 ) BTS..&. 0x9d2c5680)
+        a  = w1 `BTS.shiftL` 7
+        b  = w1 `BTS.xor` (a BTS..&. 0x9d2c5680)
+        c  = b  `BTS.shiftL` 7
+        d  = w1 `BTS.xor` (c BTS..&. 0x9d2c5680)
+        e  = d  `BTS.shiftL` 7
+        f  = w1 `BTS.xor` (e BTS..&. 0x9d2c5680)
+        g  = f  `BTS.shiftL` 7
+        h  = w1 `BTS.xor` (g BTS..&. 0x9d2c5680)
+        i  = h  `BTS.shiftL` 7
+        j  = w1 `BTS.xor` (i BTS..&. 0x9d2c5680)
+        a' = j  `BTS.shiftR` 11
+        b' = j  `BTS.xor` a'
+        c' = b' `BTS.shiftR` 11
+        d' = j  `BTS.xor` c'
+
+mtKeyStream :: W.Word16 -> LB.ByteString
+mtKeyStream seed = LB.pack . L.concatMap fromWord32 . helper . initMT $ fromIntegral seed
+  where helper state = let (n, state') = extractMT state
+                    in n : helper state'
+
+mtCipher :: W.Word16 -> B.ByteString -> B.ByteString
+mtCipher seed msg = LB.toStrict $ key `fixedXorLazy` msg'
+  where key  = mtKeyStream seed
+        msg' = LB.fromStrict msg
